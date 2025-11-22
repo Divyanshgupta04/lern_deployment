@@ -1,6 +1,6 @@
 // services/apiService.ts
 
-// Fix: Hardcode API_BASE_URL to '/api' to rely on the Vite proxy and resolve 'import.meta.env' type errors.
+// Hardcode API_BASE_URL to '/api' to rely on the Vite proxy.
 const API_BASE_URL = '/api';
 
 interface ApiResponse<T> {
@@ -8,14 +8,18 @@ interface ApiResponse<T> {
   data?: T;
   message?: string;
   error?: string;
-  errors?: { msg: string }[]; // Added for validation errors
+  errors?: { msg: string }[]; // For express-validator errors
 }
 
 const getAuthToken = (): string | null => {
-    return localStorage.getItem('authToken');
+  return localStorage.getItem('authToken');
 };
 
-async function request<T>(endpoint: string, method: string, body: unknown = null): Promise<T> {
+async function request<T>(
+  endpoint: string,
+  method: string,
+  body: unknown = null
+): Promise<T> {
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
   };
@@ -38,51 +42,60 @@ async function request<T>(endpoint: string, method: string, body: unknown = null
     const response = await fetch(`${API_BASE_URL}${endpoint}`, config);
 
     if (!response.ok) {
-        let errorToThrow;
-        try {
-            // Attempt to parse a JSON error body from the backend.
-            const errorResult = await response.json();
-            // Create a new Error object but attach the full result to it
-            errorToThrow = new Error(errorResult.message || `API Error: ${response.status} ${response.statusText}`);
-            (errorToThrow as any).data = errorResult;
-        } catch (e) {
-            // The error response wasn't JSON. Throw a plain error.
-            errorToThrow = new Error(`API Error: ${response.status} ${response.statusText}`);
-        }
-        throw errorToThrow;
+      let errorToThrow: Error;
+
+      try {
+        // Try to parse JSON error from backend
+        const errorResult = await response.json();
+        errorToThrow = new Error(
+          errorResult.message ||
+            errorResult.error ||
+            `API Error: ${response.status} ${response.statusText}`
+        );
+        (errorToThrow as any).data = errorResult;
+      } catch {
+        // Not JSON
+        errorToThrow = new Error(
+          `API Error: ${response.status} ${response.statusText}`
+        );
+      }
+
+      throw errorToThrow;
     }
 
-    // Handle successful responses that might be empty (e.g., 204 No Content)
+    // Handle 204 / empty body
     const text = await response.text();
     if (!text) {
-        return {} as T;
+      return {} as T;
     }
 
     const result: ApiResponse<T> = JSON.parse(text);
 
     if (!result.success) {
-      const error = new Error(result.message || result.error || 'An unknown API error occurred');
+      const error = new Error(
+        result.message || result.error || 'An unknown API error occurred'
+      );
       (error as any).data = result;
       throw error;
     }
-    
-    // Handle cases where `data` might be intentionally null or undefined in a successful response.
-    if (result.data === undefined) {
-      // Return a sensible default based on what might be expected (e.g., an empty object for POST/PUT, null for GET)
-      return (method === 'GET' ? null : {}) as T;
-    }
-    
-    return result.data;
 
-  } catch (error: any) {
-    // This will catch network errors (e.g., server is down)
-    if (error instanceof TypeError && error.message === 'Failed to fetch') {
-        const networkError = new Error('Cannot connect to the server. Please check your network connection and try again.');
-        (networkError as any).data = { isNetworkError: true };
-        throw networkError;
+    // If backend intentionally returns no data with success: true
+    if (result.data === undefined) {
+      return (method === 'GET' ? (null as any) : ({} as any)) as T;
     }
+
+    return result.data as T;
+  } catch (error: any) {
+    // Network / connection errors
+    if (error instanceof TypeError) {
+      const networkError = new Error(
+        'Cannot connect to the server. Please check your network connection and try again.'
+      );
+      (networkError as any).data = { isNetworkError: true };
+      throw networkError;
+    }
+
     console.error(`API Error on ${method} ${endpoint}:`, error);
-    // Re-throw other errors (like the ones we threw manually for bad responses)
     throw error;
   }
 }

@@ -52,7 +52,8 @@ describe('Auth Routes', () => {
     });
 
     it('should return 400 if user already exists', async () => {
-      await User.create(userData); // pre-populate user
+      // pre-populate user (include required fields like avatarId)
+      await User.create({ ...userData, avatarId: 0 });
 
       const res = await request(app)
         .post('/api/auth/signup')
