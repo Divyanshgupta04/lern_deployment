@@ -1,17 +1,21 @@
 // backend/src/services/geminiService.ts
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import {
   ITestResult,
   ExamGoal,
   IPlan,
   TestType,
   PlanWeek,
+  Plan,
+  PlanStep,
   Question,
   ChatMessage,
   QuestionAnalysis,
   TopicPerformance,
   Exam,
 } from "../types";
+
+// ✅ FIXED — Use ES module import (uuid is ESM-only)
 import { v4 as uuidv4 } from "uuid";
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
@@ -19,20 +23,16 @@ if (!geminiApiKey) {
   throw new Error("GEMINI_API_KEY is not defined in the environment variables.");
 }
 
-const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+const ai = new GoogleGenerativeAI(geminiApiKey);
 
-/**
- * Normalize low-level Gemini / HTTP errors into short, user-friendly messages
- * so the frontend never sees raw JSON like the quota error payload.
- */
+/** Normalize Gemini errors */
 const mapGeminiError = (error: any, action: string): Error => {
   const rawMessage = typeof error?.message === "string" ? error.message : "";
+  const rawErrorString = JSON.stringify(error, null, 2);
 
   let userMessage = `Something went wrong while ${action}. Please try again in a moment.`;
   let statusCode = 500;
 
-  // Common free-tier / quota exhaustion shapes. The client library usually
-  // stuffs the full JSON error response into `message`.
   if (
     rawMessage.includes("You exceeded your current quota") ||
     rawMessage.includes('"code":429') ||
@@ -42,17 +42,27 @@ const mapGeminiError = (error: any, action: string): Error => {
     userMessage =
       "Our AI test generator has hit its daily limit for this project. Please wait a little while and try again, or come back later today.";
     statusCode = 429;
+  } else if (rawMessage.includes("API key not valid") || rawMessage.includes("API_KEY_INVALID")) {
+    userMessage = "AI Service Configuration Error: The API key provided is invalid.";
+    console.error("CRITICAL: Gemini API Key is invalid. Check backend/.env");
+  } else if (rawMessage.includes("not found") || rawMessage.includes("404")) {
+    userMessage = "AI Service Error: The selected model is unavailable.";
+    console.error("CRITICAL: Gemini model not found. Check geminiService.ts model names.");
   }
 
-  console.error("Gemini API error while", action, "=>", error);
+  console.error(`Gemini API error during [${action}]:`, {
+    message: rawMessage,
+    statusCode: statusCode,
+    errorDetails: rawErrorString
+  });
 
   const friendlyError = new Error(userMessage);
-  // Allow the error handler to send a more appropriate status code.
   (friendlyError as any).statusCode = statusCode;
   (friendlyError as any).rawGeminiError = rawMessage;
   return friendlyError;
 };
 
+/** Parse raw JSON from Gemini */
 const parseJsonResponse = <T>(rawText: string | undefined): T => {
   if (!rawText || !rawText.trim()) {
     throw new Error("The AI response was empty.");
@@ -68,30 +78,22 @@ const parseJsonResponse = <T>(rawText: string | undefined): T => {
   }
 };
 
-// Recursively search for and extract string content from potentially nested objects.
+/** Sanitize nested content */
 const sanitizeContent = (content: any): any => {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (content === null || content === undefined) {
-    return "";
-  }
+  if (typeof content === "string") return content;
+  if (content === null || content === undefined) return "";
   if (typeof content === "object") {
     if ("content" in content && typeof (content as any).content === "string") {
       return (content as any).content;
     }
-    // If it's an array, sanitize each item.
     if (Array.isArray(content)) {
       return content.map(sanitizeContent);
     }
-    // If it's another type of object, try to find a string value.
     for (const key in content) {
-      if (typeof content[key] === "string") {
-        return content[key];
-      }
+      if (typeof content[key] === "string") return content[key];
     }
   }
-  return JSON.stringify(content); // Fallback for unexpected formats
+  return JSON.stringify(content);
 };
 
 interface AdminInsightStats {
@@ -107,8 +109,7 @@ interface AnalysisResponse {
 }
 
 export const geminiService = {
-  // ---------- 1. Generate Test Questions (AI) ----------
-
+  // ---------- 1. Generate Test Questions ----------
   async generateTestQuestions(
     testType: TestType,
     numQuestions: number,
@@ -116,295 +117,392 @@ export const geminiService = {
     difficulty?: "easy" | "medium" | "hard",
     avoidTopics?: string[]
   ): Promise<Question[]> {
-    const systemInstruction = `You are an expert exam creator for high school standardized tests (SAT, ACT, AP). Your response MUST be ONLY a valid JSON array of question objects that conforms to the provided schema. The 'options' array must contain only strings. ABSOLUTELY NO other text or markdown. Each question must have a unique "_id" string. All math MUST use valid, standard LaTeX (e.g., \\frac{a}{b}, not \\rac) and be wrapped in '$...$' for inline or '$$...$$' for display. The 'questionText' and 'options' fields must be simple strings, not nested objects. Each 'questionText' MUST be concise, under 25 words.`;
+    const systemInstruction = `
+You are an expert exam creator. 
+Create high-quality, exam-level questions with:
+- proper difficulty
+- topic alignment
+- NO arithmetic questions unless explicitly requested
+- use passages when needed
+- use logical reasoning
+- make answer keys correct
+`;
 
-    let promptModifier = "";
-    if (testType.toLowerCase().includes("diagnostic")) {
-      promptModifier +=
-        " This is a diagnostic test, so questions must cover a broad range of fundamental topics and difficulties to accurately assess baseline knowledge. ";
-    }
-    // Subject-specific guidance so mocks feel like the real section.
+    // Build detailed prompt based on test type
     const lowerType = testType.toLowerCase();
-    if (lowerType.includes("science")) {
-      promptModifier +=
-        " Treat this as an ACT Science section. Use short passages, charts, or experiment descriptions drawn from biology, chemistry, physics, or Earth/space science. Focus on data interpretation, experimental design, and scientific reasoning — NOT math problem solving.";
+    let contextualPrompt = "";
+
+    // SAT Tests
+    if (lowerType.includes("sat")) {
+      if (lowerType.includes("math") || lowerType.includes("algebra") || lowerType.includes("geometry")) {
+        contextualPrompt = `Create ${numQuestions} SAT Math questions. These should be college-level math problems covering:
+- Algebra (linear equations, systems, quadratics)
+- Problem solving and data analysis
+- Advanced math (functions, polynomials, radicals)
+- Geometry and trigonometry
+Questions should be challenging and require multi-step reasoning. NO basic arithmetic like "6+7".`;
+
+        if (lowerType.includes("algebra")) {
+          contextualPrompt += " Focus specifically on algebraic concepts: equations, inequalities, functions, and systems.";
+        } else if (lowerType.includes("geometry")) {
+          contextualPrompt += " Focus specifically on geometry: shapes, angles, area, volume, coordinate geometry, and trigonometry.";
+        }
+      } else if (lowerType.includes("reading") || lowerType.includes("writing") || lowerType.includes("rw")) {
+        contextualPrompt = `Create ${numQuestions} SAT Reading & Writing questions. Include:
+- Reading comprehension with passages from literature, science, or history
+- Grammar and usage questions
+- Vocabulary in context
+- Rhetoric and expression
+- Standard English conventions
+Provide relevant passages where needed.`;
+      } else if (lowerType.includes("diagnostic")) {
+        contextualPrompt = `Create ${numQuestions} diagnostic SAT questions covering a broad range:
+- Mix of Math (algebra, geometry, data analysis) and Reading/Writing
+- Varied difficulty levels to assess student's current level
+- Comprehensive coverage of SAT topics`;
+      }
     }
-    if (topic) {
-      promptModifier += ` This is a concept check quiz focusing specifically on the topic of: "${topic}". `;
+    // ACT Tests
+    else if (lowerType.includes("act")) {
+      if (lowerType.includes("math")) {
+        contextualPrompt = `Create ${numQuestions} ACT Math questions covering:
+- Pre-algebra and elementary algebra
+- Intermediate algebra and coordinate geometry
+- Plane geometry and trigonometry
+Questions should test mathematical reasoning, NOT basic arithmetic.`;
+      } else if (lowerType.includes("science")) {
+        contextualPrompt = `Create ${numQuestions} ACT Science questions. These should:
+- Include scientific passages with data, graphs, charts, or experimental descriptions
+- Test interpretation of scientific information
+- Cover biology, chemistry, physics, and earth science concepts
+- Require analysis and evaluation of scientific data
+Always include relevant passages or data representations.`;
+      } else if (lowerType.includes("reading")) {
+        contextualPrompt = `Create ${numQuestions} ACT Reading questions with:
+- Passages from prose fiction, social science, humanities, or natural science
+- Questions testing comprehension, inference, and analysis
+- Focus on main ideas, details, sequence, and author's craft
+Include complete passages for context.`;
+      } else if (lowerType.includes("english") || lowerType.includes("writing")) {
+        contextualPrompt = `Create ${numQuestions} ACT English questions testing:
+- Grammar and usage
+- Punctuation and sentence structure
+- Strategy and organization
+- Style and rhetoric
+Provide passages with underlined portions or specific contexts.`;
+      } else if (lowerType.includes("diagnostic")) {
+        contextualPrompt = `Create ${numQuestions} diagnostic ACT questions covering:
+- Math, Science, Reading, and English sections
+- Broad topic coverage to assess overall ACT readiness
+- Varied difficulty levels`;
+      }
     }
-    if (difficulty) {
-      promptModifier += ` The question difficulty should be '${difficulty}'. `;
+    // AP Tests
+    else if (lowerType.includes("ap")) {
+      if (lowerType.includes("calculus") || lowerType.includes("calc")) {
+        contextualPrompt = `Create ${numQuestions} AP Calculus AB questions covering:
+- Limits and continuity
+- Derivatives and their applications
+- Integrals and their applications
+- Fundamental Theorem of Calculus
+Questions should be college-level and require deep understanding.`;
+      } else if (lowerType.includes("biology")) {
+        contextualPrompt = `Create ${numQuestions} AP Biology questions covering:
+- Cell structure and function
+- Genetics and heredity
+- Evolution and ecology
+- Molecular biology and biochemistry
+Include scientific reasoning and data analysis questions.`;
+      } else if (lowerType.includes("chemistry")) {
+        contextualPrompt = `Create ${numQuestions} AP Chemistry questions covering:
+- Atomic structure and periodicity
+- Chemical bonding and molecular structure
+- Chemical reactions and stoichiometry
+- Thermodynamics and kinetics
+Require conceptual understanding and problem-solving.`;
+      } else if (lowerType.includes("physics")) {
+        contextualPrompt = `Create ${numQuestions} AP Physics 1 questions covering:
+- Kinematics and dynamics
+- Energy and momentum
+- Circular motion and gravitation
+- Waves and electricity
+Focus on conceptual understanding and application.`;
+      } else if (lowerType.includes("history") || lowerType.includes("ush") || lowerType.includes("world")) {
+        const historyType = lowerType.includes("world") ? "World History" : "US History";
+        contextualPrompt = `Create ${numQuestions} AP ${historyType} questions covering:
+- Historical periods and developments
+- Causation and continuity
+- Historical evidence and interpretation
+- Contextualization of events
+Include passages or historical documents where appropriate.`;
+      } else if (lowerType.includes("literature") || lowerType.includes("lit")) {
+        contextualPrompt = `Create ${numQuestions} AP English Literature questions:
+- Literary analysis and interpretation
+- Poetry and prose comprehension
+- Literary devices and techniques
+- Thematic analysis
+Include passages from literature.`;
+      } else if (lowerType.includes("psychology")) {
+        contextualPrompt = `Create ${numQuestions} AP Psychology questions covering:
+- Biological bases of behavior
+- Cognitive processes
+- Development and personality
+- Social psychology and research methods
+Test conceptual understanding and application.`;
+      } else if (lowerType.includes("diagnostic")) {
+        contextualPrompt = `Create ${numQuestions} diagnostic AP questions covering common AP subjects:
+- Mix of STEM and humanities topics
+- College-level rigor
+- Varied difficulty to assess AP readiness`;
+      }
     }
-    if (avoidTopics && avoidTopics.length > 0) {
-      promptModifier += ` Do not generate questions on these topics: ${avoidTopics.join(
-        ", "
-      )}. `;
+    // Daily/Concept Quiz
+    else if (lowerType.includes("quiz")) {
+      contextualPrompt = `Create ${numQuestions} quiz questions:
+- Mixed topics across math, science, and reasoning
+- Engaging and educational
+- Appropriate difficulty for daily practice`;
+    }
+    // Adaptive Tests
+    else if (lowerType.includes("adaptive")) {
+      if (lowerType.includes("sat")) {
+        contextualPrompt = `Create ${numQuestions} adaptive SAT Math questions:
+- Start with medium difficulty
+- Cover key SAT math topics
+- Allow for difficulty adjustment based on performance`;
+      } else if (lowerType.includes("act")) {
+        contextualPrompt = `Create ${numQuestions} adaptive ACT Math questions:
+- Start with medium difficulty
+- Cover key ACT math topics
+- Allow for difficulty adjustment based on performance`;
+      }
+    }
+    // Fallback for unrecognized types
+    else {
+      contextualPrompt = `Create ${numQuestions} high-quality academic questions for "${testType}":
+- Appropriate difficulty and depth
+- Clear and unambiguous
+- Correct answer keys`;
     }
 
-    const userPrompt = `Generate ${numQuestions} high-quality, authentic-style question(s) for a "${testType}" exam.${promptModifier}`;
+    // Add topic focus if specified
+    if (topic) {
+      contextualPrompt += `\n\nSpecific topic focus: "${topic}". Ensure all questions relate to this topic.`;
+    }
+
+    // Add difficulty constraint if specified
+    if (difficulty) {
+      contextualPrompt += `\n\nDifficulty level: ${difficulty}. Adjust question complexity accordingly.`;
+    }
+
+    // Add topics to avoid if specified
+    if (avoidTopics?.length) {
+      contextualPrompt += `\n\nAvoid these topics: ${avoidTopics.join(", ")}.`;
+    }
+
+    const userPrompt = contextualPrompt;
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: userPrompt,
-        config: {
+      const model = ai.getGenerativeModel({
+        model: "gemini-2.0-flash",
+        systemInstruction,
+      });
+
+      const response = await model.generateContent({
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+        generationConfig: {
           responseMimeType: "application/json",
           responseSchema: {
-            type: Type.ARRAY,
+            type: SchemaType.ARRAY,
             items: {
-              type: Type.OBJECT,
+              type: SchemaType.OBJECT,
               properties: {
-                _id: { type: Type.STRING },
-                questionText: { type: Type.STRING },
-                options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                correctAnswerIndex: { type: Type.NUMBER },
-                explanation: { type: Type.STRING },
-                topic: { type: Type.STRING },
-                difficulty: {
-                  type: Type.STRING,
-                  enum: ["easy", "medium", "hard"],
-                },
-                passage: { type: Type.STRING },
+                _id: { type: SchemaType.STRING },
+                questionText: { type: SchemaType.STRING },
+                options: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+                correctAnswerIndex: { type: SchemaType.NUMBER },
+                explanation: { type: SchemaType.STRING },
+                topic: { type: SchemaType.STRING },
+                difficulty: { type: SchemaType.STRING },
+                passage: { type: SchemaType.STRING },
               },
-              required: [
-                "_id",
-                "questionText",
-                "options",
-                "correctAnswerIndex",
-                "explanation",
-                "topic",
-              ],
+              required: ["_id", "questionText", "options", "correctAnswerIndex", "explanation", "topic"],
             },
           },
-          systemInstruction: systemInstruction,
         },
       });
 
-      const result = parseJsonResponse<any[]>(response.text);
+      const result = parseJsonResponse<any[]>(response.response.text());
 
-      if (!result || !Array.isArray(result) || result.length === 0) {
+      if (!Array.isArray(result) || result.length === 0) {
         throw new Error("AI returned an empty or invalid list of questions.");
       }
 
-      const sanitizedResult: Question[] = result.map(
-        (q: any, index: number): Question => {
-          if (
-            !q ||
-            typeof q.questionText === "undefined" ||
-            !Array.isArray(q.options) ||
-            typeof q.correctAnswerIndex !== "number" ||
-            q.options.length < 2
-          ) {
-            throw new Error(
-              `AI returned malformed question object at index ${index}.`
-            );
-          }
-
-          const sanitizedOptions: string[] = q.options.map(sanitizeContent);
-
-          if (
-            q.correctAnswerIndex < 0 ||
-            q.correctAnswerIndex >= sanitizedOptions.length
-          ) {
-            console.warn(
-              `AI returned an invalid correctAnswerIndex (${q.correctAnswerIndex}) for question ${index}. Defaulting to 0.`
-            );
-            q.correctAnswerIndex = 0;
-          }
-
-          return {
-            _id: q._id || uuidv4(),
-            questionText: sanitizeContent(q.questionText),
-            options: sanitizedOptions,
-            correctAnswerIndex: q.correctAnswerIndex,
-            explanation:
-              sanitizeContent(q.explanation) || "No explanation provided.",
-            topic: sanitizeContent(q.topic) || "General",
-            difficulty: q.difficulty,
-            passage: sanitizeContent(q.passage),
-          };
-        }
-      );
-
-      return sanitizedResult;
+      return result.map((q: any, i: number): Question => ({
+        _id: q._id || uuidv4(),
+        questionText: sanitizeContent(q.questionText),
+        options: q.options.map(sanitizeContent),
+        correctAnswerIndex:
+          typeof q.correctAnswerIndex === "number" &&
+            q.correctAnswerIndex >= 0 &&
+            q.correctAnswerIndex < q.options.length
+            ? q.correctAnswerIndex
+            : 0,
+        explanation: sanitizeContent(q.explanation) || "No explanation provided.",
+        topic: sanitizeContent(q.topic) || "General",
+        difficulty: q.difficulty,
+        passage: sanitizeContent(q.passage),
+      }));
     } catch (error) {
       throw mapGeminiError(error, "generating test questions");
     }
   },
 
-  // ---------- 2. Analyze Test Results (AI) ----------
-
+  // ---------- 2. Analyze Test Results ----------
   async analyzeTestResults(
     testResult: Partial<ITestResult>
   ): Promise<AnalysisResponse> {
     if (!testResult.questions || !testResult.answers) {
-      throw new Error("Questions and answers are required for analysis.");
+      throw new Error("Questions & answers required.");
     }
+
     const analysisPayload = testResult.questions.map((q) => {
-      const userAnswer = testResult.answers!.find(
-        (ua) => ua.questionId === q._id
-      );
+      const userAnswer = testResult.answers!.find((ua) => ua.questionId === q._id);
       return {
         question: q.questionText,
         correctAnswer: q.options[q.correctAnswerIndex],
-        userAnswer:
-          userAnswer !== undefined
-            ? q.options[userAnswer.answerIndex]
-            : "Not answered",
+        userAnswer: userAnswer ? q.options[userAnswer.answerIndex] : "Not answered",
         topic: q.topic,
       };
     });
 
-    const userPrompt = `Analyze this JSON data from a student's "${testResult.testType}" test. Provide a detailed analysis. \n\n${JSON.stringify(
-      analysisPayload
-    )}`;
+    const prompt = `Analyze test results: ${JSON.stringify(analysisPayload)}`;
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: userPrompt,
-        config: {
+      const model = ai.getGenerativeModel({
+        model: "gemini-2.0-flash",
+      });
+
+      const response = await model.generateContent({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
           responseMimeType: "application/json",
           responseSchema: {
-            type: Type.OBJECT,
+            type: SchemaType.OBJECT,
             properties: {
-              summary: { type: Type.STRING },
+              summary: { type: SchemaType.STRING },
               questionAnalysis: {
-                type: Type.ARRAY,
+                type: SchemaType.ARRAY,
                 items: {
-                  type: Type.OBJECT,
+                  type: SchemaType.OBJECT,
                   properties: {
-                    questionText: { type: Type.STRING },
-                    userAnswer: { type: Type.STRING },
-                    correctAnswer: { type: Type.STRING },
-                    isCorrect: { type: Type.BOOLEAN },
-                    explanation: { type: Type.STRING },
-                    topic: { type: Type.STRING },
-                    questionType: { type: Type.STRING },
+                    questionText: { type: SchemaType.STRING },
+                    userAnswer: { type: SchemaType.STRING },
+                    correctAnswer: { type: SchemaType.STRING },
+                    isCorrect: { type: SchemaType.BOOLEAN },
+                    explanation: { type: SchemaType.STRING },
+                    topic: { type: SchemaType.STRING },
+                    questionType: { type: SchemaType.STRING },
                   },
+                  required: ["questionText", "userAnswer", "correctAnswer", "isCorrect", "explanation", "topic"],
                 },
               },
               topicPerformance: {
-                type: Type.ARRAY,
+                type: SchemaType.ARRAY,
                 items: {
-                  type: Type.OBJECT,
+                  type: SchemaType.OBJECT,
                   properties: {
-                    topic: { type: Type.STRING },
-                    correct: { type: Type.NUMBER },
-                    total: { type: Type.NUMBER },
+                    topic: { type: SchemaType.STRING },
+                    correct: { type: SchemaType.NUMBER },
+                    total: { type: SchemaType.NUMBER },
                   },
+                  required: ["topic", "correct", "total"],
                 },
               },
             },
+            required: ["summary", "questionAnalysis", "topicPerformance"],
           },
-          systemInstruction: `You are an academic analysis AI. Your function is to analyze student test results. Your entire response must be ONLY a valid JSON object matching the provided schema. Do not add any text or markdown outside the JSON structure. For the 'summary', provide a brief, encouraging, and actionable 1-2 sentence overview. For 'explanation', offer a clear, concise sentence that helps the student learn. For 'topic', use 1-2 words. For 'questionType', identify a specific skill (e.g., "Main Idea", "Linear Equations").`,
         },
       });
 
-      const result = parseJsonResponse<any>(response.text);
-      if (!result) throw new Error("AI returned empty analysis data.");
+      const result = parseJsonResponse<any>(response.response.text());
 
-      const validatedAnalysis: AnalysisResponse = {
-      summary:
-        sanitizeContent(result.summary) ||
-        "Your results have been analyzed. Review the breakdown below to see your strengths and areas for improvement.",
-      questionAnalysis: (result.questionAnalysis || []).map((qa: any) => ({
-        questionText: sanitizeContent(qa.questionText) || "Unknown Question",
-        userAnswer: sanitizeContent(qa.userAnswer) || "Not Answered",
-        correctAnswer: sanitizeContent(qa.correctAnswer) || "Unknown",
-        isCorrect: typeof qa.isCorrect === "boolean" ? qa.isCorrect : false,
-        explanation:
-          sanitizeContent(qa.explanation) || "No explanation provided.",
-        topic: sanitizeContent(qa.topic) || "General",
-        questionType: sanitizeContent(qa.questionType) || "General",
-      })),
-      topicPerformance: (result.topicPerformance || []).map((tp: any) => ({
-        topic: sanitizeContent(tp.topic) || "Unknown Topic",
-        correct: typeof tp.correct === "number" ? tp.correct : 0,
-        total: typeof tp.total === "number" && tp.total > 0 ? tp.total : 1,
-      })),
-    };
-
-    return validatedAnalysis;
-  } catch (error) {
-    throw mapGeminiError(error, "analyzing your test results");
-  }
+      return {
+        summary: sanitizeContent(result.summary),
+        questionAnalysis: (result.questionAnalysis || []).map((qa: any) => ({
+          questionText: sanitizeContent(qa.questionText),
+          userAnswer: sanitizeContent(qa.userAnswer),
+          correctAnswer: sanitizeContent(qa.correctAnswer),
+          isCorrect: !!qa.isCorrect,
+          explanation: sanitizeContent(qa.explanation),
+          topic: sanitizeContent(qa.topic),
+          questionType: sanitizeContent(qa.questionType),
+        })),
+        topicPerformance: (result.topicPerformance || []).map((tp: any) => ({
+          topic: sanitizeContent(tp.topic),
+          correct: tp.correct ?? 0,
+          total: tp.total ?? 1,
+        })),
+      };
+    } catch (error) {
+      throw mapGeminiError(error, "analyzing your test results");
+    }
   },
 
-  // ---------- 3. Generate Learning Plan (NO AI, always valid) ----------
-
-  async generateLearningPlan(goal: ExamGoal, result: ITestResult): Promise<IPlan> {
-    // Sort topics by weakest accuracy
+  // ---------- 3. Generate Learning Plan ----------
+  async generateLearningPlan(goal: ExamGoal, result: ITestResult): Promise<Plan> {
     const sortedTopics = [...result.topicPerformance].sort((a, b) => {
-      const accA = a.total > 0 ? a.correct / a.total : 0;
-      const accB = b.total > 0 ? b.correct / b.total : 0;
+      const accA = a.total ? a.correct / a.total : 0;
+      const accB = b.total ? b.correct / b.total : 0;
       return accA - accB;
     });
 
-    const weakestTopics =
-      sortedTopics
-        .filter((t) => t.total > 0)
-        .slice(0, 5)
-        .map((t) => t.topic || "General") || [];
+    const weakest = sortedTopics.slice(0, 5).map((t) => t.topic);
 
-    // Rough number of weeks until exam
     let weeksCount = 8;
     if (goal.examDate) {
       const examTime = Date.parse(goal.examDate);
-      if (!Number.isNaN(examTime)) {
-        const now = Date.now();
-        const diffDays = Math.max(7, Math.round((examTime - now) / 86400000));
-        weeksCount = Math.min(12, Math.max(4, Math.ceil(diffDays / 7)));
-      }
+      const now = Date.now();
+      const diff = Math.max(7, Math.round((examTime - now) / 86400000));
+      weeksCount = Math.min(12, Math.max(4, Math.ceil(diff / 7)));
     }
 
     const today = new Date();
     const weeks: PlanWeek[] = [];
 
-    // Pick a reasonable default mini test type based on the student's goal.
-    const pickMiniTestType = (goal: ExamGoal, result: ITestResult): TestType => {
+    const pickMini = () => {
       if (goal.exam === Exam.SAT) return TestType.SAT_RW_MOCK;
       if (goal.exam === Exam.ACT) return TestType.ACT_READING_MOCK;
       if (goal.exam === Exam.AP) return TestType.AP_USH_MOCK;
-      return (result.testType as TestType) || TestType.SAT_RW_MOCK;
+      return result.testType as TestType;
     };
 
-    const miniTestType = pickMiniTestType(goal, result);
+    const miniType = pickMini();
 
     for (let i = 0; i < weeksCount; i++) {
-      const weekNumber = i + 1;
-
       const start = new Date(today);
       start.setDate(start.getDate() + i * 7);
       const end = new Date(start);
       end.setDate(end.getDate() + 6);
 
-      const startDate = start.toISOString(); // ✅ required
-      const endDate = end.toISOString();     // ✅ required
+      const topic = weakest[i % weakest.length] || "General";
 
-      const topicForWeek =
-        weakestTopics.length > 0
-          ? weakestTopics[i % weakestTopics.length]
-          : "General";
-
-      const steps = [
+      const steps: PlanStep[] = [
         {
-          _id: uuidv4(), // ✅ required
+          _id: uuidv4(),
           title: "Learn core concepts",
-          description: `Study key ideas for ${topicForWeek}.`,
+          description: `Study key ideas for ${topic}.`,
           type: "concept" as const,
-          relatedTestType: undefined,
-          topic: topicForWeek,
+          topic,
           completed: false,
           estimatedTime: "~30 mins",
         },
         {
           _id: uuidv4(),
           title: "Practice questions",
-          description: `Solve focused questions on ${topicForWeek}.`,
+          description: `Solve focused questions on ${topic}.`,
           type: "review" as const,
-          relatedTestType: undefined,
-          topic: topicForWeek,
+          topic,
           completed: false,
           estimatedTime: "~25 mins",
         },
@@ -413,82 +511,66 @@ export const geminiService = {
           title: "Mini test",
           description: "Take a short timed quiz.",
           type: "test" as const,
-          relatedTestType: miniTestType,
-          topic: undefined,
+          relatedTestType: miniType,
           completed: false,
           estimatedTime: "~20 mins",
         },
       ];
 
       weeks.push({
-        week: weekNumber, 
-        startDate,       
-        endDate,          
-        summary: `Focus on ${topicForWeek} and timed practice.`, 
+        week: i + 1,
+        startDate: start.toISOString(),
+        endDate: end.toISOString(),
+        summary: `Focus on ${topic} and timed practice.`,
         steps,
-      } as PlanWeek);
+      });
     }
 
-    const fullPlan: IPlan = {
+    return {
+      _id: uuidv4(),
       generatedOn: new Date().toISOString(),
       goal,
       weeks,
     };
-
-    return fullPlan;
   },
 
-  // ---------- 4. Streaming Chat (Aicey) ----------
-
+  // ---------- 4. Streaming Chat ----------
   async getAiceyResponseStream(chatHistory: ChatMessage[], context?: string) {
-    const model = "gemini-2.5-flash";
-    const contents = chatHistory.map((message) => ({
-      role: message.role,
-      parts: [{ text: message.content }],
-    }));
-
-    const systemInstruction = `You are Aicey, a friendly, encouraging AI study assistant for high school students. You are an expert in SAT, ACT, and AP subjects. Your personality is positive and helpful. Keep answers brief. Use emojis. 😊 Format with short paragraphs and lists. ${
-      context ? `\n\nIMPORTANT CONTEXT ABOUT THE USER: ${context}` : ""
-    }`;
-
     try {
-      const response = await ai.models.generateContentStream({
-        model: model,
-        contents: contents,
-        config: {
-          systemInstruction,
-        },
+      const model = ai.getGenerativeModel({
+        model: "gemini-2.0-flash",
+        systemInstruction: `You are Aicey, a friendly AI tutor. ${context ? `User context: ${context}` : ""}`,
       });
 
-      return response;
+      return await model.generateContentStream({
+        contents: chatHistory.map((m) => ({
+          role: (m.role as string) === "assistant" ? "model" : "user",
+          parts: [{ text: m.content }],
+        })),
+      });
     } catch (error) {
       throw mapGeminiError(error, "chatting with Aicey");
     }
   },
 
-  // ---------- 5. Admin Insights (AI) ----------
-
+  // ---------- 5. Admin Insights ----------
   async getAdminInsights(stats: AdminInsightStats) {
-    const prompt = `Analyze this aggregated performance data for an online learning platform. Provide a brief, high-level summary as a single block of text. Focus on:
-        1. **Overall Performance:** Comment on general trends based on the provided user statistics.
-        2. **Top Struggling Areas:** Identify the top struggling topics from the accuracy data.
-        3. **Actionable Advice:** Give one concrete, platform-wide suggestion for improvement.
-        Keep the entire response under 150 words. Format with markdown for clarity (e.g., using **bold** headers).
-
-        **Data Snapshot:**
-        - **Total Active Users:** ${stats.totalUsers}
-        - **Sample User Stats (first 100 users):** ${JSON.stringify(stats.userStats)}
-        - **Weakest Topics (by accuracy):** ${JSON.stringify(stats.weakestTopics)}
-        `;
+    const prompt = `
+Analyze platform data (under 150 words):
+- Total Users: ${stats.totalUsers}
+- User Stats: ${JSON.stringify(stats.userStats)}
+- Weakest Topics: ${JSON.stringify(stats.weakestTopics)}
+`;
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
+      const model = ai.getGenerativeModel({
+        model: "gemini-2.0-flash",
       });
-      return response.text;
+
+      const response = await model.generateContent(prompt);
+      return response.response.text();
     } catch (error) {
-      throw mapGeminiError(error, "generating admin AI insights");
+      throw mapGeminiError(error, "generating admin insights");
     }
   },
 };

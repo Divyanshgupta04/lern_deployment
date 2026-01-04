@@ -15,15 +15,17 @@ const PlanStepSchema = new Schema<PlanStep>({
 
 
 const PlanWeekSchema = new Schema({
+    _id: { type: String }, // Optional but prevents casting issues if present
     week: { type: Number, required: true },
     startDate: { type: String, required: true },
     endDate: { type: String, required: true },
     summary: { type: String, required: true },
     steps: [PlanStepSchema]
-});
+}, { _id: false });
 
 
 export const PlanSchema = new Schema<IPlan>({
+    _id: { type: String, required: true },
     generatedOn: { type: String, required: true },
     goal: {
         exam: { type: String, enum: ['SAT', 'ACT', 'AP'], required: true },
@@ -31,4 +33,4 @@ export const PlanSchema = new Schema<IPlan>({
         examDate: { type: String, required: true }
     },
     weeks: [PlanWeekSchema]
-});
+}, { _id: false });

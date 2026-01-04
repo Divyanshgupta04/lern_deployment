@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -12,9 +12,10 @@ const ResultsWrapper: React.FC = () => {
     const location = useLocation();
     const navigate = useNavigate();
     const { user, _updateUserFromResponse } = useAuth();
-    
+
     const [showPlanReadyToast, setShowPlanReadyToast] = useState(false);
-    
+    const mutationInitiatedFor = useRef<string | null>(null);
+
     const { result, planDetails } = (location.state || {}) as { result: TestResult, planDetails?: any };
 
     useEffect(() => {
@@ -25,7 +26,7 @@ const ResultsWrapper: React.FC = () => {
     }, [result, navigate]);
 
     const generatePlanMutation = useMutation({
-        mutationFn: (data: { userId: string, testResultId: string }) => 
+        mutationFn: (data: { userId: string, testResultId: string }) =>
             userService.generatePlan(data.userId, data.testResultId),
         onSuccess: (updatedUserWithPlan) => {
             _updateUserFromResponse(updatedUserWithPlan);
@@ -37,7 +38,8 @@ const ResultsWrapper: React.FC = () => {
     });
 
     useEffect(() => {
-        if (result?.isDiagnostic && user) {
+        if (result?.isDiagnostic && user && result._id !== mutationInitiatedFor.current) {
+            mutationInitiatedFor.current = result._id;
             generatePlanMutation.mutate({ userId: user._id, testResultId: result._id });
         }
     }, [result, user]);
@@ -45,7 +47,7 @@ const ResultsWrapper: React.FC = () => {
     const error = generatePlanMutation.error?.message;
 
     if (error) {
-         return (
+        return (
             <div className="min-h-screen flex flex-col items-center justify-center text-center p-4">
                 <h2 className="text-2xl font-bold text-red-600">Error Generating Plan</h2>
                 <p className="text-slate-600 mt-2">{error}</p>
@@ -55,28 +57,28 @@ const ResultsWrapper: React.FC = () => {
             </div>
         );
     }
-    
+
     // NOTE: We no longer block on a full-screen "Generating Your Plan" loader.
     // The plan is generated in the background while the user views results,
     // and the "View My New Plan" button shows a small spinner instead.
 
     if (result) {
-       return (
-        <>
-            <ResultsView 
-                result={result}
-                isGeneratingPlan={generatePlanMutation.isPending}
-                onGoToPlan={() => navigate('/dashboard', { state: { view: 'my-plan' }})}
-            />
-            {showPlanReadyToast && (
-                <AchievementToast
-                    message="Your personalized plan is ready!"
-                    type="default"
-                    onClose={() => setShowPlanReadyToast(false)}
+        return (
+            <>
+                <ResultsView
+                    result={result}
+                    isGeneratingPlan={generatePlanMutation.isPending}
+                    onGoToPlan={() => navigate('/dashboard', { state: { view: 'my-plan' } })}
                 />
-            )}
-        </>
-       );
+                {showPlanReadyToast && (
+                    <AchievementToast
+                        message="Your personalized plan is ready!"
+                        type="default"
+                        onClose={() => setShowPlanReadyToast(false)}
+                    />
+                )}
+            </>
+        );
     }
 
     // Fallback loading state
