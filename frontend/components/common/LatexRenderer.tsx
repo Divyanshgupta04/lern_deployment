@@ -122,8 +122,8 @@ const LatexRenderer: React.FC<{ content: string | undefined | null }> = ({ conte
                     try {
                         (window as any).renderMathInElement(container, {
                             delimiters: [
-                                {left: '$$', right: '$$', display: true},
-                                {left: '$', right: '$', display: false}
+                                { left: '$$', right: '$$', display: true },
+                                { left: '$', right: '$', display: false }
                             ],
                             throwOnError: false
                         });
@@ -146,7 +146,7 @@ const LatexRenderer: React.FC<{ content: string | undefined | null }> = ({ conte
 
     if (!content) return null;
 
-    return <span ref={containerRef} key={content} />;
+    return <span ref={containerRef} />;
 };
 
 export default LatexRenderer;
