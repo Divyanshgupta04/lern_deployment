@@ -41,8 +41,8 @@ router.post('/chat', protect, asyncHandler(async (req: AuthRequest, res: express
         const { history, context } = req.body; // <-- Added context
         const stream = await geminiService.getAiceyResponseStream(history, context);
 
-        for await (const chunk of stream) {
-            const text = chunk.text;
+        for await (const chunk of stream.stream) {
+            const text = chunk.text();
             if (text) {
                 // SSE format: data: { ...JSON... }\n\n
                 res.write(`data: ${JSON.stringify({ textChunk: text })}\n\n`);
