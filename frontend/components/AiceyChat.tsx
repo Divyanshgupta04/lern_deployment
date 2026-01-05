@@ -13,21 +13,21 @@ const AiceyChat: React.FC<AiceyChatProps> = ({ onClose, initialContext }) => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
-  
+
   useEffect(() => {
-      const fetchInitialMessage = async () => {
-        setIsLoading(true);
-        const initialHistory: ChatMessage[] = [];
-        const greeting: ChatMessage = { role: 'model', content: '' };
-        setMessages([greeting]);
-        
-        try {
-            // Enhanced system context for more flexible and comprehensive responses
-            const systemContext = `You are Aicey, an educational assistant. Follow these guidelines:
+    const fetchInitialMessage = async () => {
+      setIsLoading(true);
+      const initialHistory: ChatMessage[] = [];
+      const greeting: ChatMessage = { role: 'model', content: '' };
+      setMessages([greeting]);
+
+      try {
+        // Enhanced system context for more flexible and comprehensive responses
+        const systemContext = `You are Aicey, an educational assistant. Follow these guidelines:
             1. Provide detailed answers when the user needs in-depth explanations
             2. Keep responses concise for simple questions
             3. Use markdown formatting: **bold** for key points, *italics* for emphasis
@@ -36,44 +36,52 @@ const AiceyChat: React.FC<AiceyChatProps> = ({ onClose, initialContext }) => {
             6. Structure complex answers with clear sections
             Adapt your response length and depth based on the user's question complexity.`;
 
-            const mergedContext = [initialContext, systemContext].filter(Boolean).join('\n');
-            const stream = await getAiceyResponse(initialHistory, mergedContext);
-            const reader = stream.getReader();
-            const decoder = new TextDecoder();
+        const mergedContext = [initialContext, systemContext].filter(Boolean).join('\n');
+        const stream = await getAiceyResponse(initialHistory, mergedContext);
+        const reader = stream.getReader();
+        const decoder = new TextDecoder();
 
-            while (true) {
+        let buffer = '';
+        while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+
+          // Keep the last partial line in the buffer
+          buffer = lines.pop() || '';
 
           for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        try {
-                            const json = JSON.parse(line.substring(6));
-                            if (json.textChunk) {
-                                setMessages(prev => {
-                                    const updated = [...prev];
-                                    updated[updated.length - 1].content += json.textChunk;
-                                    return updated;
-                                });
-                            }
-                            if (json.error) throw new Error(json.error);
-                        } catch (e) {
-                            console.error("Failed to parse SSE line:", line);
-                        }
+            const trimmedLine = line.trim();
+            if (trimmedLine.startsWith('data: ')) {
+              try {
+                const json = JSON.parse(trimmedLine.substring(6));
+                if (json.textChunk) {
+                  setMessages(prev => {
+                    const updated = [...prev];
+                    const lastMsg = updated[updated.length - 1];
+                    if (lastMsg && lastMsg.role === 'model') {
+                      lastMsg.content += json.textChunk;
                     }
+                    return updated;
+                  });
                 }
+                if (json.error) throw new Error(json.error);
+              } catch (e) {
+                console.error("Failed to parse SSE line:", trimmedLine);
+              }
             }
-        } catch (error) {
-            setMessages([{ role: 'model', content: "Sorry, I couldn't connect right now. Please try again." }]);
-        } finally {
-            setIsLoading(false);
+          }
         }
-      };
+      } catch (error) {
+        setMessages([{ role: 'model', content: "Sorry, I couldn't connect right now. Please try again." }]);
+      } finally {
+        setIsLoading(false);
+      }
+    };
 
-      fetchInitialMessage();
+    fetchInitialMessage();
   }, [initialContext]);
 
   useEffect(scrollToBottom, [messages]);
@@ -89,7 +97,7 @@ const AiceyChat: React.FC<AiceyChatProps> = ({ onClose, initialContext }) => {
       .replace(/\*(.*?)\*/gs, '<em>$1</em>')
       .replace(/\n{2,}/g, '<br /><br />')
       .replace(/\n/g, '<br />');
-    
+
     return out;
   };
 
@@ -105,50 +113,59 @@ const AiceyChat: React.FC<AiceyChatProps> = ({ onClose, initialContext }) => {
     setMessages(prev => [...prev, { role: 'model', content: '' }]);
 
     try {
-        // Use a "sliding window" of the last 12 messages to keep conversations efficient.
-        const stream = await getAiceyResponse(newMessages.slice(-12), undefined);
-        const reader = stream.getReader();
-        const decoder = new TextDecoder();
-        
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+      // Use a "sliding window" of the last 12 messages to keep conversations efficient.
+      const stream = await getAiceyResponse(newMessages.slice(-12), undefined);
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
 
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        const json = JSON.parse(line.substring(6));
-                        if (json.textChunk) {
-                            setMessages(prev => {
-                                const updated = [...prev];
-                                updated[updated.length - 1].content += json.textChunk;
-                                return updated;
-                            });
-                        }
-                        if (json.error) throw new Error(json.error);
-                    } catch (e) {
-                        console.error("Failed to parse SSE line:", line);
-                    }
-                }
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+
+        // Keep the last partial line in the buffer
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (trimmedLine.startsWith('data: ')) {
+            try {
+              const json = JSON.parse(trimmedLine.substring(6));
+              if (json.textChunk) {
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastMsg = updated[updated.length - 1];
+                  if (lastMsg && lastMsg.role === 'model') {
+                    lastMsg.content += json.textChunk;
+                  }
+                  return updated;
+                });
+              }
+              if (json.error) throw new Error(json.error);
+            } catch (e) {
+              console.error("Failed to parse SSE line:", trimmedLine);
             }
+          }
         }
+      }
     } catch (error) {
-        const errorMessage: ChatMessage = { role: 'model', content: "Sorry, I encountered an error. Please try again." };
-        setMessages(prev => [...prev.slice(0, -1), errorMessage]);
+      const errorMessage: ChatMessage = { role: 'model', content: "Sorry, I encountered an error. Please try again." };
+      setMessages(prev => [...prev.slice(0, -1), errorMessage]);
     } finally {
-        setIsLoading(false);
+      setIsLoading(false);
     }
   };
-  
+
   return (
     <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in">
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl w-full max-w-lg h-[80vh] flex flex-col overflow-hidden">
         <header className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-800 flex-shrink-0">
           <div className="flex items-center space-x-3">
             <div className="bg-gradient-to-tr from-blue-500 to-cyan-400 p-2 rounded-full">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.4 1.4L3 12l5.8 1.9a2 2 0 0 1 1.4 1.4L12 21l1.9-5.8a2 2 0 0 1 1.4-1.4L21 12l-5.8-1.9a2 2 0 0 1-1.4-1.4Z"/></svg>
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.4 1.4L3 12l5.8 1.9a2 2 0 0 1 1.4 1.4L12 21l1.9-5.8a2 2 0 0 1 1.4-1.4L21 12l-5.8-1.9a2 2 0 0 1-1.4-1.4Z" /></svg>
             </div>
             <div>
               <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">Aicey</h2>
@@ -159,13 +176,13 @@ const AiceyChat: React.FC<AiceyChatProps> = ({ onClose, initialContext }) => {
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           </button>
         </header>
-          <div className="flex-grow p-4 space-y-4 overflow-y-auto bg-slate-50 dark:bg-slate-800/50">
+        <div className="flex-grow p-4 space-y-4 overflow-y-auto bg-slate-50 dark:bg-slate-800/50">
           {messages.map((msg, index) => (
             <div key={index} className={`flex items-end gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               {msg.role === 'model' && <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-500 to-cyan-400 flex-shrink-0 self-start mt-1 shadow-md"></div>}
               <div className={`max-w-xs md:max-w-md p-3 rounded-2xl break-words shadow-sm ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-none whitespace-pre-wrap' : 'bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-bl-none'}`}>
-                 <LatexRenderer content={processContentForDisplay(msg.content)} />
-                 {isLoading && msg.role === 'model' && index === messages.length - 1 && <span className="inline-block w-2 h-4 bg-slate-400 dark:bg-slate-500 ml-2 animate-pulse rounded-sm"></span>}
+                <LatexRenderer content={processContentForDisplay(msg.content)} />
+                {isLoading && msg.role === 'model' && index === messages.length - 1 && <span className="inline-block w-2 h-4 bg-slate-400 dark:bg-slate-500 ml-2 animate-pulse rounded-sm"></span>}
               </div>
             </div>
           ))}
