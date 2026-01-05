@@ -60,9 +60,12 @@ const AiceyChat: React.FC<AiceyChatProps> = ({ onClose, initialContext }) => {
                 if (json.textChunk) {
                   setMessages(prev => {
                     const updated = [...prev];
-                    const lastMsg = updated[updated.length - 1];
-                    if (lastMsg && lastMsg.role === 'model') {
-                      lastMsg.content += json.textChunk;
+                    const lastMsgIndex = updated.length - 1;
+                    if (lastMsgIndex >= 0 && updated[lastMsgIndex].role === 'model') {
+                      updated[lastMsgIndex] = {
+                        ...updated[lastMsgIndex],
+                        content: updated[lastMsgIndex].content + json.textChunk
+                      };
                     }
                     return updated;
                   });
@@ -137,9 +140,12 @@ const AiceyChat: React.FC<AiceyChatProps> = ({ onClose, initialContext }) => {
               if (json.textChunk) {
                 setMessages(prev => {
                   const updated = [...prev];
-                  const lastMsg = updated[updated.length - 1];
-                  if (lastMsg && lastMsg.role === 'model') {
-                    lastMsg.content += json.textChunk;
+                  const lastMsgIndex = updated.length - 1;
+                  if (lastMsgIndex >= 0 && updated[lastMsgIndex].role === 'model') {
+                    updated[lastMsgIndex] = {
+                      ...updated[lastMsgIndex],
+                      content: updated[lastMsgIndex].content + json.textChunk
+                    };
                   }
                   return updated;
                 });

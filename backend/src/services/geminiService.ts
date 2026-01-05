@@ -544,7 +544,7 @@ Test conceptual understanding and application.`;
 
       return await model.generateContentStream({
         contents: chatHistory.map((m) => ({
-          role: (m.role as string) === "assistant" ? "model" : "user",
+          role: m.role === "model" ? "model" : "user",
           parts: [{ text: m.content }],
         })),
       });
