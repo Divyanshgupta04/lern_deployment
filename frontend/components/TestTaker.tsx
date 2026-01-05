@@ -57,7 +57,7 @@ const Sidebar: React.FC<{
             </div>
 
             <div className="flex-grow overflow-y-auto">
-                 <h3 className="font-bold text-lg mb-3">Question Navigator</h3>
+                <h3 className="font-bold text-lg mb-3">Question Navigator</h3>
                 <div className="grid grid-cols-5 gap-2">
                     {questions.map((q, index) => (
                         <button key={q._id} onClick={() => onNavigate(index)} className={getButtonClass(index)}>
@@ -66,7 +66,7 @@ const Sidebar: React.FC<{
                     ))}
                 </div>
             </div>
-            
+
             <div className="mt-6 text-sm">
                 <h4 className="font-bold mb-2">Legend:</h4>
                 <div className="flex items-center gap-2 mb-1"><div className="w-4 h-4 rounded-sm bg-blue-600 border border-blue-400"></div><span>Current</span></div>
@@ -108,7 +108,7 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
     const handleSubmitQuiz = useCallback(() => {
         const formattedAnswers: UserAnswer[] = Object.entries(answers).map(([questionId, answerIndex]) => ({
             questionId,
-            answerIndex,
+            answerIndex: answerIndex as number,
         }));
         onComplete(sessionId, formattedAnswers);
     }, [onComplete, sessionId, answers]);
@@ -129,7 +129,7 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
         }, 1000);
         return () => clearInterval(timer);
     }, [isPaused, isSubmitting, handleSubmitQuiz]);
-    
+
     // Cleanup auto-advance timer on unmount
     useEffect(() => {
         return () => {
@@ -142,15 +142,32 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
     const handleAnswerSelect = (questionId: string, answerIndex: number) => {
         if (autoAdvanceTimerRef.current) {
             clearTimeout(autoAdvanceTimerRef.current);
+            autoAdvanceTimerRef.current = null;
         }
 
         setAnswers(prev => ({ ...prev, [questionId]: answerIndex }));
 
         if (currentIndex < questions.length - 1) {
-             autoAdvanceTimerRef.current = window.setTimeout(() => {
+            autoAdvanceTimerRef.current = window.setTimeout(() => {
                 setCurrentIndex(i => i + 1);
             }, 2000);
         }
+    };
+
+    const handleNext = () => {
+        if (autoAdvanceTimerRef.current) {
+            clearTimeout(autoAdvanceTimerRef.current);
+            autoAdvanceTimerRef.current = null;
+        }
+        setCurrentIndex(i => Math.min(questions.length - 1, i + 1));
+    };
+
+    const handlePrevious = () => {
+        if (autoAdvanceTimerRef.current) {
+            clearTimeout(autoAdvanceTimerRef.current);
+            autoAdvanceTimerRef.current = null;
+        }
+        setCurrentIndex(i => Math.max(0, i - 1));
     };
 
     const handleQuit = () => {
@@ -166,7 +183,7 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
             autoAdvanceTimerRef.current = null;
         }
     };
-    
+
     const handleResume = () => {
         setIsPaused(false);
     };
@@ -192,7 +209,7 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
                 currentIndex={currentIndex}
                 answers={answers}
                 onNavigate={(index) => {
-                     if (autoAdvanceTimerRef.current) {
+                    if (autoAdvanceTimerRef.current) {
                         clearTimeout(autoAdvanceTimerRef.current);
                         autoAdvanceTimerRef.current = null;
                     }
@@ -205,7 +222,7 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
                 <header className="bg-white p-4 flex justify-between items-center border-b border-slate-200">
                     <div className="font-bold text-xl">{formatTime(timeLeft)}</div>
                     <div>
-                         <button onClick={handlePause} className="bg-slate-200 text-slate-700 font-bold py-2 px-6 rounded-lg mr-4 hover:bg-slate-300 transition-colors">
+                        <button onClick={handlePause} className="bg-slate-200 text-slate-700 font-bold py-2 px-6 rounded-lg mr-4 hover:bg-slate-300 transition-colors">
                             Pause
                         </button>
                         <button onClick={handleSubmitQuiz} className="bg-brand-blue text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 transition-colors">
@@ -222,7 +239,7 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
                                     {answers[currentQuestion._id] !== undefined ? 'Answered' : 'Not Answered'}
                                 </span>
                             </div>
-                             <div className="p-6 md:p-8">
+                            <div className="p-6 md:p-8">
                                 {currentQuestion.passage && (
                                     <div className="mb-6 p-4 bg-slate-50 border border-slate-200 rounded-lg max-h-48 overflow-y-auto text-sm text-slate-600 leading-relaxed">
                                         <LatexRenderer content={currentQuestion.passage} />
@@ -232,7 +249,7 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
                                     <LatexRenderer content={currentQuestion.questionText} />
                                 </div>
                                 <div className="space-y-4">
-                                     {currentQuestion.options.map((option, index) => {
+                                    {currentQuestion.options.map((option, index) => {
                                         const isSelected = answers[currentQuestion._id] === index;
                                         return (
                                             <label key={index} className={`w-full text-left p-4 rounded-lg border-2 transition-all duration-200 flex items-center text-base sm:text-lg cursor-pointer ${isSelected ? 'bg-blue-50 border-brand-blue ring-2 ring-blue-200' : 'bg-white border-slate-300 hover:border-slate-400'}`}>
@@ -249,21 +266,21 @@ const TestTaker: React.FC<TestTakerProps> = ({ sessionId, questions, totalQuesti
                                                 />
                                             </label>
                                         );
-                                     })}
+                                    })}
                                 </div>
                             </div>
                         </div>
                         <div className="flex justify-between items-center mt-6">
-                            <button onClick={() => setCurrentIndex(i => Math.max(0, i - 1))} disabled={currentIndex === 0} className="bg-white border border-slate-300 font-bold py-2 px-6 rounded-lg hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <button onClick={handlePrevious} disabled={currentIndex === 0} className="bg-white border border-slate-300 font-bold py-2 px-6 rounded-lg hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed">
                                 Previous
                             </button>
-                             <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5">
                                 {questions.slice(0, 15).map((_, index) => (
                                     <div key={index} className={`w-2.5 h-2.5 rounded-full transition-colors ${index === currentIndex ? 'bg-brand-blue' : 'bg-slate-300'}`}></div>
                                 ))}
                                 {questions.length > 15 && <div className="text-slate-400 font-bold">...</div>}
                             </div>
-                            <button onClick={() => setCurrentIndex(i => Math.min(questions.length - 1, i + 1))} disabled={currentIndex === questions.length - 1} className="bg-brand-blue text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <button onClick={handleNext} disabled={currentIndex === questions.length - 1} className="bg-brand-blue text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
                                 Next
                             </button>
                         </div>
